@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional, overload
 
 import healpy as hp
 import numpy as np
@@ -16,6 +16,7 @@ from .filters import (
 
 FloatArray = npt.NDArray[np.float64]
 IntArray = npt.NDArray[np.int64]
+FitMode = Literal["both", "dust", "synchrotron"]
 
 
 def make_mask_index(w: npt.NDArray[np.floating], thr: float = 1e-6) -> IntArray:
@@ -458,7 +459,12 @@ def solve_C(
     RuntimeError
         If CG does not converge.
     """
-    x, info = cg(cop, b, M=mop, rtol=tol, atol=0.0, maxiter=maxiter)
+    try:
+        x, info = cg(cop, b, M=mop, rtol=tol, atol=0.0, maxiter=maxiter)
+    except TypeError as exc:
+        if "rtol" not in str(exc):
+            raise
+        x, info = cg(cop, b, M=mop, tol=tol, maxiter=maxiter)
     if info != 0:
         raise RuntimeError(
             f"CG did not converge (info={info}). Try better preconditioning, "
@@ -467,6 +473,72 @@ def solve_C(
     return x.astype(np.float64, copy=False)
 
 
+def _resolve_fit_mode(fit_mode: FitMode | str) -> FitMode:
+    """Validate and normalize the requested fit mode.
+
+    Parameters
+    ----------
+    fit_mode : {"both", "dust", "synchrotron"} or str
+        Requested component selection for the template fit.
+
+    Returns
+    -------
+    {"both", "dust", "synchrotron"}
+        Normalized fit mode.
+
+    Raises
+    ------
+    ValueError
+        If ``fit_mode`` is not a supported option.
+    """
+    allowed_modes = ("both", "dust", "synchrotron")
+    if fit_mode not in allowed_modes:
+        raise ValueError(
+            "fit_mode must be one of "
+            f"{allowed_modes}, got {fit_mode!r}."
+        )
+    return fit_mode
+
+
+def _require_template_pair(
+    template1: npt.NDArray[np.floating] | None,
+    template2: npt.NDArray[np.floating] | None,
+    component_name: str,
+    fit_mode: FitMode,
+) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+    """Validate that the requested component has both split templates.
+
+    Parameters
+    ----------
+    template1 : ndarray of float or None
+        First split template for the selected component.
+    template2 : ndarray of float or None
+        Second split template for the selected component.
+    component_name : str
+        Human-readable component label used in error messages.
+    fit_mode : {"both", "dust", "synchrotron"}
+        Active fit mode requesting the component.
+
+    Returns
+    -------
+    template1_resolved : ndarray of float
+        Validated first split template.
+    template2_resolved : ndarray of float
+        Validated second split template.
+
+    Raises
+    ------
+    ValueError
+        If either split template is missing.
+    """
+    if template1 is None or template2 is None:
+        raise ValueError(
+            f"fit_mode={fit_mode!r} requires both {component_name} split templates."
+        )
+    return template1, template2
+
+
+@overload
 def cross_split_fit_operatorW(
     y: npt.NDArray[np.floating],
     d1: npt.NDArray[np.floating],
@@ -478,22 +550,75 @@ def cross_split_fit_operatorW(
     tol: float = 1e-6,
     maxiter: int = 200,
     sym: bool = True,
+    fit_mode: Literal["both"] = "both",
 ) -> tuple[float, float, FloatArray, FloatArray]:
+    ...
+
+
+@overload
+def cross_split_fit_operatorW(
+    y: npt.NDArray[np.floating],
+    d1: npt.NDArray[np.floating],
+    d2: npt.NDArray[np.floating],
+    s1: None = None,
+    s2: None = None,
+    cop: LinearOperator | None = None,
+    mop: Optional[LinearOperator] = None,
+    tol: float = 1e-6,
+    maxiter: int = 200,
+    sym: bool = True,
+    fit_mode: Literal["dust"] = "dust",
+) -> tuple[float, None, FloatArray, FloatArray]:
+    ...
+
+
+@overload
+def cross_split_fit_operatorW(
+    y: npt.NDArray[np.floating],
+    d1: None = None,
+    d2: None = None,
+    s1: npt.NDArray[np.floating] | None = None,
+    s2: npt.NDArray[np.floating] | None = None,
+    cop: LinearOperator | None = None,
+    mop: Optional[LinearOperator] = None,
+    tol: float = 1e-6,
+    maxiter: int = 200,
+    sym: bool = True,
+    fit_mode: Literal["synchrotron"] = "synchrotron",
+) -> tuple[None, float, FloatArray, FloatArray]:
+    ...
+
+
+def cross_split_fit_operatorW(
+    y: npt.NDArray[np.floating],
+    d1: npt.NDArray[np.floating] | None = None,
+    d2: npt.NDArray[np.floating] | None = None,
+    s1: npt.NDArray[np.floating] | None = None,
+    s2: npt.NDArray[np.floating] | None = None,
+    cop: Optional[LinearOperator] = None,
+    mop: Optional[LinearOperator] = None,
+    tol: float = 1e-6,
+    maxiter: int = 200,
+    sym: bool = True,
+    fit_mode: FitMode = "both",
+) -> tuple[float | None, float | None, FloatArray, FloatArray]:
     """Estimate dust/synch template amplitudes using ``W = C^{-1}``.
 
     Parameters
     ----------
     y : ndarray of float
         Compressed target vector ``[Q(idx); U(idx)]``.
-    d1 : ndarray of float
-        First dust split template.
-    d2 : ndarray of float
-        Second dust split template.
-    s1 : ndarray of float
-        First synchrotron split template.
-    s2 : ndarray of float
-        Second synchrotron split template.
-    cop : scipy.sparse.linalg.LinearOperator
+    d1 : ndarray of float or None, optional
+        First dust split template. Required when ``fit_mode`` uses dust.
+    d2 : ndarray of float or None, optional
+        Second dust split template. Required when ``fit_mode`` uses dust.
+    s1 : ndarray of float or None, optional
+        First synchrotron split template. Required when ``fit_mode`` uses
+        synchrotron.
+    s2 : ndarray of float or None, optional
+        Second synchrotron split template. Required when ``fit_mode`` uses
+        synchrotron.
+    cop : scipy.sparse.linalg.LinearOperator or None, optional
         Covariance operator ``C``.
     mop : scipy.sparse.linalg.LinearOperator, optional
         Preconditioner used for each CG solve.
@@ -504,49 +629,107 @@ def cross_split_fit_operatorW(
     sym : bool, optional
         If ``True``, symmetrize the normal matrix and RHS using both split
         orderings.
+    fit_mode : {"both", "dust", "synchrotron"}, optional
+        Component subset to fit. ``"both"`` solves the coupled 2-parameter
+        system, while ``"dust"`` and ``"synchrotron"`` perform the
+        corresponding single-component fit. Inactive template arguments may be
+        omitted as ``None``.
 
     Returns
     -------
-    ad : float
-        Estimated dust amplitude.
-    a_s : float
-        Estimated synchrotron amplitude.
+    ad : float or None
+        Estimated dust amplitude. Returns ``None`` when
+        ``fit_mode="synchrotron"``.
+    a_s : float or None
+        Estimated synchrotron amplitude. Returns ``None`` when
+        ``fit_mode="dust"``.
     G : ndarray of float64
-        2x2 normal matrix used in the solve.
+        Normal matrix used in the solve. Its shape is ``(2, 2)`` for
+        ``fit_mode="both"`` and ``(1, 1)`` otherwise.
     bvec : ndarray of float64
-        2-vector right-hand side.
+        Right-hand side vector. Its length is ``2`` for ``fit_mode="both"``
+        and ``1`` otherwise.
+
+    Raises
+    ------
+    ValueError
+        If ``cop`` is missing or the active fit mode is missing its required
+        split templates.
 
     Notes
     -----
     The estimator is:
 
-    ``a = (Z^T W X)^{-1} (Z^T W y)``, with ``X=[d1,s1]`` and ``Z=[d2,s2]``.
+    ``a = (Z^T W X)^{-1} (Z^T W y)``, where ``X`` and ``Z`` contain the
+    selected split templates. For ``fit_mode="both"``, ``X=[d1,s1]`` and
+    ``Z=[d2,s2]``. For the single-component modes, only the requested dust or
+    synchrotron template is included.
     """
+    fit_mode = _resolve_fit_mode(fit_mode)
+    if cop is None:
+        raise ValueError("cop must be provided.")
+
     wy = solve_C(cop, y, mop=mop, tol=tol, maxiter=maxiter)
 
-    wd1 = solve_C(cop, d1, mop=mop, tol=tol, maxiter=maxiter)
-    ws1 = solve_C(cop, s1, mop=mop, tol=tol, maxiter=maxiter)
-
-    if sym:
-        wd2 = solve_C(cop, d2, mop=mop, tol=tol, maxiter=maxiter)
-        ws2 = solve_C(cop, s2, mop=mop, tol=tol, maxiter=maxiter)
+    split1_templates: list[npt.NDArray[np.floating]]
+    split2_templates: list[npt.NDArray[np.floating]]
+    weighted_split1_templates: list[FloatArray]
+    weighted_split2_templates: list[FloatArray] = []
+    if fit_mode == "both":
+        dust1, dust2 = _require_template_pair(d1, d2, component_name="dust", fit_mode=fit_mode)
+        sync1, sync2 = _require_template_pair(s1, s2, component_name="synchrotron", fit_mode=fit_mode)
+        split1_templates = [dust1, sync1]
+        split2_templates = [dust2, sync2]
+        weighted_split1_templates = [
+            solve_C(cop, dust1, mop=mop, tol=tol, maxiter=maxiter),
+            solve_C(cop, sync1, mop=mop, tol=tol, maxiter=maxiter),
+        ]
+        if sym:
+            weighted_split2_templates = [
+                solve_C(cop, dust2, mop=mop, tol=tol, maxiter=maxiter),
+                solve_C(cop, sync2, mop=mop, tol=tol, maxiter=maxiter),
+            ]
+    elif fit_mode == "dust":
+        dust1, dust2 = _require_template_pair(d1, d2, component_name="dust", fit_mode=fit_mode)
+        split1_templates = [dust1]
+        split2_templates = [dust2]
+        weighted_split1_templates = [solve_C(cop, dust1, mop=mop, tol=tol, maxiter=maxiter)]
+        if sym:
+            weighted_split2_templates = [solve_C(cop, dust2, mop=mop, tol=tol, maxiter=maxiter)]
+    else:
+        sync1, sync2 = _require_template_pair(s1, s2, component_name="synchrotron", fit_mode=fit_mode)
+        split1_templates = [sync1]
+        split2_templates = [sync2]
+        weighted_split1_templates = [solve_C(cop, sync1, mop=mop, tol=tol, maxiter=maxiter)]
+        if sym:
+            weighted_split2_templates = [solve_C(cop, sync2, mop=mop, tol=tol, maxiter=maxiter)]
 
     gmat = np.array(
-        [[d2 @ wd1, d2 @ ws1], [s2 @ wd1, s2 @ ws1]],
+        [
+            [template2 @ weighted_template1 for weighted_template1 in weighted_split1_templates]
+            for template2 in split2_templates
+        ],
         dtype=np.float64,
     )
-    bvec = np.array([d2 @ wy, s2 @ wy], dtype=np.float64)
+    bvec = np.array([template2 @ wy for template2 in split2_templates], dtype=np.float64)
 
     if sym:
         gmat2 = np.array(
-            [[d1 @ wd2, d1 @ ws2], [s1 @ wd2, s1 @ ws2]],
+            [
+                [template1 @ weighted_template2 for weighted_template2 in weighted_split2_templates]
+                for template1 in split1_templates
+            ],
             dtype=np.float64,
         )
-        bvec2 = np.array([d1 @ wy, s1 @ wy], dtype=np.float64)
+        bvec2 = np.array([template1 @ wy for template1 in split1_templates], dtype=np.float64)
         gmat = 0.5 * (gmat + gmat2)
         bvec = 0.5 * (bvec + bvec2)
 
     amps = np.linalg.solve(gmat, bvec)
+    if fit_mode == "dust":
+        return float(amps[0]), None, gmat, bvec
+    if fit_mode == "synchrotron":
+        return None, float(amps[0]), gmat, bvec
     return float(amps[0]), float(amps[1]), gmat, bvec
 
 
@@ -560,5 +743,6 @@ __all__ = [
     "make_C_operator",
     "make_Minv_operator",
     "solve_C",
+    "FitMode",
     "cross_split_fit_operatorW",
 ]

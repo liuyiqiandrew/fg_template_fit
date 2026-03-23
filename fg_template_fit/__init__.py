@@ -3,6 +3,7 @@
 from .core import (
     apply_N_blocks,
     apply_P_qu,
+    FitMode,
     cross_split_fit_operatorW,
     enforce_spd_blocks,
     make_C_operator,
@@ -29,6 +30,7 @@ __all__ = [
     "apply_N_blocks",
     "enforce_spd_blocks",
     "apply_P_qu",
+    "FitMode",
     "make_C_operator",
     "make_Minv_operator",
     "solve_C",

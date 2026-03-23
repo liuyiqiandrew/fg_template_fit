@@ -172,6 +172,31 @@ def test_solve_C_raises_when_cg_does_not_converge(monkeypatch: pytest.MonkeyPatc
         core.solve_C(eye, b)
 
 
+def test_solve_C_falls_back_to_legacy_tol_keyword(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retry CG with the legacy ``tol`` keyword when ``rtol`` is unsupported."""
+    recorded_kwargs: dict[str, object] = {}
+
+    def fake_cg(*args, **kwargs):  # type: ignore[no-untyped-def]
+        if "rtol" in kwargs:
+            raise TypeError("cg() got an unexpected keyword argument 'rtol'")
+        recorded_kwargs.update(kwargs)
+        b = args[1]
+        return b.astype(np.float64, copy=True), 0
+
+    monkeypatch.setattr(core, "cg", fake_cg)
+
+    n = 3
+    eye = LinearOperator((n, n), matvec=lambda x: x, dtype=np.float64)
+    b = np.ones(n, dtype=np.float64)
+
+    x = core.solve_C(eye, b, tol=1e-9, maxiter=12)
+
+    assert np.allclose(x, b)
+    assert recorded_kwargs["tol"] == 1e-9
+    assert recorded_kwargs["maxiter"] == 12
+    assert "rtol" not in recorded_kwargs
+
+
 def test_cross_split_fit_operatorW_recovers_known_amplitudes_with_identity_covariance() -> None:
     """Recover known template amplitudes in a noiseless identity-covariance case."""
     n = 3
@@ -198,3 +223,115 @@ def test_cross_split_fit_operatorW_recovers_known_amplitudes_with_identity_covar
     assert np.allclose([ad, a_s], [ad_true, as_true], atol=1e-10)
     assert gmat.shape == (2, 2)
     assert bvec.shape == (2,)
+
+
+def test_cross_split_fit_operatorW_supports_dust_only_mode_with_optional_sync_templates() -> None:
+    """Allow dust-only fits to omit the inactive synchrotron templates."""
+    n = 3
+    d = np.array([1.0, -0.4, 2.2, 0.1, 0.7, -1.5], dtype=np.float64)
+    s = np.array([-0.3, 1.1, 0.2, 2.0, -0.8, 0.4], dtype=np.float64)
+    y = 1.7 * d - 0.45 * s
+
+    eye = LinearOperator((2 * n, 2 * n), matvec=lambda x: x, dtype=np.float64)
+    ad, a_s, gmat, bvec = core.cross_split_fit_operatorW(
+        y=y,
+        d1=d,
+        d2=d,
+        cop=eye,
+        fit_mode="dust",
+        tol=1e-12,
+        maxiter=30,
+        sym=True,
+    )
+
+    expected_ad = float((d @ y) / (d @ d))
+    assert a_s is None
+    assert ad is not None
+    assert np.isclose(ad, expected_ad)
+    assert gmat.shape == (1, 1)
+    assert bvec.shape == (1,)
+    assert np.isclose(gmat[0, 0], d @ d)
+    assert np.isclose(bvec[0], d @ y)
+
+
+def test_cross_split_fit_operatorW_supports_synchrotron_only_mode_with_optional_dust_templates() -> None:
+    """Allow synchrotron-only fits to omit the inactive dust templates."""
+    n = 3
+    d = np.array([1.0, -0.4, 2.2, 0.1, 0.7, -1.5], dtype=np.float64)
+    s = np.array([-0.3, 1.1, 0.2, 2.0, -0.8, 0.4], dtype=np.float64)
+    y = 1.7 * d - 0.45 * s
+
+    eye = LinearOperator((2 * n, 2 * n), matvec=lambda x: x, dtype=np.float64)
+    ad, a_s, gmat, bvec = core.cross_split_fit_operatorW(
+        y=y,
+        s1=s,
+        s2=s,
+        cop=eye,
+        fit_mode="synchrotron",
+        tol=1e-12,
+        maxiter=30,
+        sym=True,
+    )
+
+    expected_as = float((s @ y) / (s @ s))
+    assert ad is None
+    assert a_s is not None
+    assert np.isclose(a_s, expected_as)
+    assert gmat.shape == (1, 1)
+    assert bvec.shape == (1,)
+    assert np.isclose(gmat[0, 0], s @ s)
+    assert np.isclose(bvec[0], s @ y)
+
+
+def test_cross_split_fit_operatorW_raises_when_required_templates_are_missing() -> None:
+    """Reject single-component fits when their active templates are omitted."""
+    n = 3
+    d = np.array([1.0, -0.4, 2.2, 0.1, 0.7, -1.5], dtype=np.float64)
+    s = np.array([-0.3, 1.1, 0.2, 2.0, -0.8, 0.4], dtype=np.float64)
+    y = 1.7 * d - 0.45 * s
+
+    eye = LinearOperator((2 * n, 2 * n), matvec=lambda x: x, dtype=np.float64)
+
+    with pytest.raises(ValueError, match="dust split templates"):
+        core.cross_split_fit_operatorW(
+            y=y,
+            cop=eye,
+            fit_mode="dust",
+            tol=1e-12,
+            maxiter=30,
+            sym=True,
+        )
+
+    with pytest.raises(ValueError, match="synchrotron split templates"):
+        core.cross_split_fit_operatorW(
+            y=y,
+            cop=eye,
+            fit_mode="synchrotron",
+            tol=1e-12,
+            maxiter=30,
+            sym=True,
+        )
+
+
+def test_cross_split_fit_operatorW_raises_for_invalid_fit_mode() -> None:
+    """Reject unsupported fit-mode strings with a clear error."""
+    n = 3
+    d = np.array([1.0, -0.4, 2.2, 0.1, 0.7, -1.5], dtype=np.float64)
+    s = np.array([-0.3, 1.1, 0.2, 2.0, -0.8, 0.4], dtype=np.float64)
+    y = 1.7 * d - 0.45 * s
+
+    eye = LinearOperator((2 * n, 2 * n), matvec=lambda x: x, dtype=np.float64)
+
+    with pytest.raises(ValueError, match="fit_mode"):
+        core.cross_split_fit_operatorW(
+            y=y,
+            d1=d,
+            d2=d,
+            s1=s,
+            s2=s,
+            cop=eye,
+            fit_mode="invalid",
+            tol=1e-12,
+            maxiter=30,
+            sym=True,
+        )

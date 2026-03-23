@@ -14,6 +14,7 @@ __all__ = [
     "apply_N_blocks",
     "enforce_spd_blocks",
     "apply_P_qu",
+    "FitMode",
     "make_C_operator",
     "make_Minv_operator",
     "solve_C",
