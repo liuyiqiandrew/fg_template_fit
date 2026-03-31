@@ -242,8 +242,7 @@ def apply_P_qu(
     if lmax is None:
         lmax = 3 * nside - 1
 
-    alm_e, alm_b = hp.map2alm_spin([q, u], spin=2, lmax=lmax, iter=0)
-
+    alm_e, alm_b = hp.map2alm_spin([q, u], spin=2, lmax=lmax)
     ell_window = resolve_ell_filter(lmax=lmax, ell_filter=ell_filter, fl=fl)
     m_window = resolve_m_filter(lmax=lmax, m_filter=m_filter)
 
@@ -260,7 +259,7 @@ def apply_P_qu(
         hp.almxfl(alm_e, bl, inplace=True)
         hp.almxfl(alm_b, bl, inplace=True)
 
-    q2, u2 = hp.alm2map_spin([alm_e, alm_b], nside=nside, spin=2, lmax=lmax, verbose=False)
+    q2, u2 = hp.alm2map_spin([alm_e, alm_b], nside=nside, spin=2, lmax=lmax)
     return q2.astype(np.float64, copy=False), u2.astype(np.float64, copy=False)
 
 

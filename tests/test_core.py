@@ -100,6 +100,35 @@ def test_make_Minv_operator_matches_per_pixel_inverse_action() -> None:
     assert np.allclose(out, expected)
 
 
+def test_apply_P_qu_falls_back_when_map2alm_spin_rejects_iter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retry ``map2alm_spin`` without ``iter`` for older healpy versions."""
+    call_kwargs: list[dict[str, object]] = []
+
+    def fake_map2alm_spin(maps, spin, lmax=None, **kwargs):  # type: ignore[no-untyped-def]
+        call_kwargs.append(dict(kwargs))
+        if "iter" in kwargs:
+            raise TypeError("map2alm_spin_healpy() got an unexpected keyword argument 'iter'")
+        return np.array([1.0 + 0.0j]), np.array([2.0 + 0.0j])
+
+    def fake_alm2map_spin(alms, nside, spin, lmax=None, verbose=False):  # type: ignore[no-untyped-def]
+        _ = (alms, spin, lmax, verbose)
+        npix = 12 * nside * nside
+        return np.full(npix, 3.0, dtype=np.float64), np.full(npix, -4.0, dtype=np.float64)
+
+    monkeypatch.setattr(core.hp, "map2alm_spin", fake_map2alm_spin)
+    monkeypatch.setattr(core.hp, "alm2map_spin", fake_alm2map_spin)
+
+    q = np.zeros(12, dtype=np.float64)
+    u = np.zeros(12, dtype=np.float64)
+
+    q2, u2 = core.apply_P_qu(q, u, nside=1, fwhm_rad=None, lmax=2)
+
+    assert np.allclose(q2, 3.0)
+    assert np.allclose(u2, -4.0)
+    assert call_kwargs[0]["iter"] == 0
+    assert call_kwargs[1] == {}
+
+
 def test_make_C_operator_matches_expected_when_P_is_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     """Validate C matvec against manual formula when P is patched to identity."""
     monkeypatch.setattr(
